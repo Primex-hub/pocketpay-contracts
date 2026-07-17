@@ -1,7 +1,7 @@
 // Reusable test helpers for SavingsVault contract tests.
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::{Address, Env};
 
 /// Returns a default test environment with all auth calls mocked.
 pub fn test_env() -> Env {
@@ -37,4 +37,14 @@ pub fn seed_balances(client: &SavingsVaultClient, user: &Address, amounts: &[i12
 /// Sets the ledger timestamp.
 pub fn set_ledger_timestamp(env: &Env, timestamp: u64) {
     env.ledger().with_mut(|li| li.timestamp = timestamp);
+}
+
+/// Sets up a test environment with the contract registered.
+/// Returns the environment, contract address, and a client.
+pub fn setup() -> (Env, Address, SavingsVaultClient<'static>) {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SavingsVault, ());
+    let client = SavingsVaultClient::new(&env, &contract_id);
+    (env, contract_id, client)
 }

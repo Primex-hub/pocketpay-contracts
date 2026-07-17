@@ -4,7 +4,7 @@
 //! on-chain interactions in an isolated environment.
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, Env};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address};
 
 mod test_helpers;
 use test_helpers::*;
