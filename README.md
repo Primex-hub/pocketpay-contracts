@@ -1,4 +1,6 @@
 # Stellar PocketPay — Savings Vault Contract
+
+[CHANGELOG](CHANGELOG.md)
 ## Security Considerations
 
 > **This contract is for educational and testnet use.** Review the following before any mainnet deployment.
@@ -91,6 +93,17 @@ All tests run natively (no WASM needed) using the Soroban SDK test utilities.
 
 ---
 
+## Task Runner
+
+Common tasks are available via `make`:
+
+```bash
+make test        # Run all tests
+make build-wasm  # Build the contract WASM in release mode
+make clean       # Clean build artifacts
+```
+---
+
 ## Deploy to Testnet
 
 ### 1. Configure the Stellar Testnet
@@ -177,6 +190,11 @@ stellar-pocketpay-contracts/
     ├── pause-design.md                 # Pause / emergency stop research
     └── upgrade-strategy.md             # Upgrade strategy research
 ```
+
+---
+## Documentation
+
+- [Architecture Documentation](docs/architecture.md) – Overview of project structure, state management, storage, SDK integration, and future extension points.
 
 ---
 

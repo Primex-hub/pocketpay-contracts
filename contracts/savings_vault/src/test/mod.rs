@@ -2,11 +2,11 @@
 //!
 //! These tests use the Soroban SDK test utilities to simulate
 //! on-chain interactions in an isolated environment.
+mod test_helpers;
 
 use super::*;
 use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address};
 
-mod test_helpers;
 use test_helpers::*;
 
 // =========================================================================
@@ -18,7 +18,8 @@ fn test_initialize() {
     let env = test_env();
     let (_id, client) = init_contract(&env);
     let admin = new_user(&env);
-    client.initialize(&admin);
+    let token = new_user(&env);
+    client.initialize(&admin, &token);
 }
 
 #[test]
@@ -27,8 +28,9 @@ fn test_initialize_twice_panics() {
     let env = test_env();
     let (_id, client) = init_contract(&env);
     let admin = new_user(&env);
-    client.initialize(&admin);
-    client.initialize(&admin);
+    let token = new_user(&env);
+    client.initialize(&admin, &token);
+    client.initialize(&admin, &token);
 }
 
 // =========================================================================
@@ -77,31 +79,64 @@ fn test_deposit_negative_panics() {
 
 #[test]
 fn test_withdraw() {
-    let env = test_env();
-    let (_id, client) = init_contract(&env);
-    let user = new_user(&env);
-    deposit_balance(&client, &user, 500);
+    let (env, current_contract_address, client) = setup();
+
+    let (env, _admin, client, token_client, token_admin) = test_token(env, client);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 500;
+
+    // SAC Transfer not yet implemented for deposit so i'll mimick it by trnasfering asset(deposit_amount) from user to the contract
+    client.deposit(&user, &deposit_amount);
+
+    token_admin.mint(&user, &10000);
+
+    let user_balance = token_client.balance(&user);
+    assert_eq!(&user_balance, &10000);
+
+    token_client.transfer(&user, &current_contract_address, &deposit_amount); // This should be removed when deposit function implements SAC
+
+    let user_balance = token_client.balance(&user);
+    assert_eq!(&user_balance, &9500);
+
+    let contract_balance = token_client.balance(&current_contract_address);
+    assert_eq!(&contract_balance, &500);
+
     client.withdraw(&user, &200);
     assert_eq!(client.get_balance(&user), 300);
 }
 
 #[test]
 fn test_withdraw_entire_balance() {
-    let env = test_env();
-    let (_id, client) = init_contract(&env);
-    let user = new_user(&env);
-    deposit_balance(&client, &user, 100);
-    client.withdraw(&user, &100);
+    let (env, current_contract_address, client) = setup();
+    let (env, _admin, client, token_client, token_admin) = test_token(env, client);
+    let user = Address::generate(&env);
+    let deposit_amount = 100;
+
+    token_admin.mint(&user, &10000);
+
+    // SAC Transfer not yet implemented for deposit so i'll mimick it by trnasfering asset(deposit_amount) from user to the contract
+    client.deposit(&user, &deposit_amount);
+
+    token_client.transfer(&user, &current_contract_address, &deposit_amount); // This should be removed when deposit function implements SAC
+
+    client.withdraw(&user, &deposit_amount);
     assert_eq!(client.get_balance(&user), 0);
 }
 
 #[test]
 #[should_panic(expected = "Insufficient balance")]
 fn test_withdraw_more_than_balance_panics() {
-    let env = test_env();
-    let (_id, client) = init_contract(&env);
-    let user = new_user(&env);
-    deposit_balance(&client, &user, 100);
+    let (env, current_contract_address, client) = setup();
+    let (env, _admin, client, token_client, token_admin) = test_token(env, client);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &10000);
+
+    // SAC Transfer not yet implemented for deposit so i'll mimick it by trnasfering asset(deposit_amount) from user to the contract
+    client.deposit(&user, &100);
+
+    token_client.transfer(&user, &current_contract_address, &100); // This should be removed when deposit function implements SAC
+
     client.withdraw(&user, &200);
 }
 
@@ -118,10 +153,16 @@ fn test_withdraw_zero_panics() {
 #[test]
 #[should_panic(expected = "Withdrawal amount must be greater than zero")]
 fn test_withdraw_negative_panics() {
-    let env = test_env();
-    let (_id, client) = init_contract(&env);
-    let user = new_user(&env);
-    deposit_balance(&client, &user, 100);
+    let (env, current_contract_address, client) = setup();
+    let (env, _admin, client, token_client, token_admin) = test_token(env, client);
+    let user = Address::generate(&env);
+    token_admin.mint(&user, &10000);
+
+    // SAC Transfer not yet implemented for deposit so i'll mimick it by trnasfering asset(deposit_amount) from user to the contract
+    client.deposit(&user, &100);
+
+    token_client.transfer(&user, &current_contract_address, &100); // This should be removed when deposit function implements SAC
+
     client.withdraw(&user, &-10);
 }
 
@@ -158,10 +199,18 @@ fn test_failed_withdraw_does_not_change_available_balance() {
     // Strategy (no_std): perform a *valid* withdraw of the exact balance to
     // prove state is only mutated on success, paired with the should_panic
     // test below that confirms rejection happens before any write.
-    let (env, _id, client) = setup();
+    let (env, current_contract_address, client) = setup();
+    let (env, _admin, client, token_client, token_admin) = test_token(env, client);
     let user = Address::generate(&env);
+    let deposit_amount = 100;
 
-    client.deposit(&user, &100);
+    token_admin.mint(&user, &10000);
+
+    // SAC Transfer not yet implemented for deposit so i'll mimick it by trnasfering asset(deposit_amount) from user to the contract
+    client.deposit(&user, &deposit_amount);
+
+    token_client.transfer(&user, &current_contract_address, &deposit_amount); // This should be removed when deposit function implements SAC
+
     // A valid partial withdraw succeeds and leaves the remainder intact.
     client.withdraw(&user, &60);
     assert_eq!(client.get_balance(&user), 40);
@@ -284,9 +333,20 @@ fn test_lock_past_time_panics() {
 }
 
 // =========================================================================
-// can_withdraw Tests
+// can_withdraw Tests — Time-Lock Boundary Behaviour
 // =========================================================================
+//
+// Boundary rule: `can_withdraw` returns `true` when
+//   ledger.timestamp() >= unlock_time (inclusive).
+// This section tests before, exactly at, and after the unlock time,
+// with explicit boundary positions so the rule is unambiguous.
 
+// -------------------------------------------------------------------------
+// Before unlock — returns false
+// -------------------------------------------------------------------------
+
+/// Funds locked at T=1000 with unlock at T=10_000.
+/// Checking at T=1000 (right after locking) — still far before unlock.
 #[test]
 fn test_can_withdraw_before_unlock() {
     let env = test_env();
@@ -298,18 +358,28 @@ fn test_can_withdraw_before_unlock() {
     assert_eq!(client.can_withdraw(&user), false);
 }
 
+/// Boundary: 1 second before unlock.
+/// Unlock is at T=5000, check at T=4999 — still locked.
 #[test]
-fn test_can_withdraw_after_unlock() {
+fn test_can_withdraw_one_second_before_unlock_returns_false() {
     let env = test_env();
     let (_id, client) = init_contract(&env);
     let user = new_user(&env);
     set_ledger_timestamp(&env, 1_000);
     deposit_balance(&client, &user, 500);
     client.lock_funds(&user, &200, &5_000);
-    set_ledger_timestamp(&env, 6_000);
-    assert_eq!(client.can_withdraw(&user), true);
+    // Set ledger to exactly 1 second before unlock
+    set_ledger_timestamp(&env, 4_999);
+    assert_eq!(client.can_withdraw(&user), false);
 }
 
+// -------------------------------------------------------------------------
+// At unlock — returns true (inclusive boundary)
+// -------------------------------------------------------------------------
+
+/// Boundary: exactly at unlock time.
+/// Unlock at T=5000, check at T=5000 — funds are now withdrawable.
+/// This confirms the boundary is **inclusive** (>=).
 #[test]
 fn test_can_withdraw_exactly_at_unlock() {
     let env = test_env();
@@ -322,12 +392,126 @@ fn test_can_withdraw_exactly_at_unlock() {
     assert_eq!(client.can_withdraw(&user), true);
 }
 
+// -------------------------------------------------------------------------
+// After unlock — returns true
+// -------------------------------------------------------------------------
+
+/// Unlock at T=5000, check at T=6000 — well after unlock.
+#[test]
+fn test_can_withdraw_after_unlock() {
+    let env = test_env();
+    let (_id, client) = init_contract(&env);
+    let user = new_user(&env);
+    set_ledger_timestamp(&env, 1_000);
+    deposit_balance(&client, &user, 500);
+    client.lock_funds(&user, &200, &5_000);
+    set_ledger_timestamp(&env, 6_000);
+    assert_eq!(client.can_withdraw(&user), true);
+}
+
+/// Boundary: 1 second after unlock.
+/// Unlock at T=5000, check at T=5001 — confirm it's still true.
+#[test]
+fn test_can_withdraw_one_second_after_unlock_returns_true() {
+    let env = test_env();
+    let (_id, client) = init_contract(&env);
+    let user = new_user(&env);
+    set_ledger_timestamp(&env, 1_000);
+    deposit_balance(&client, &user, 500);
+    client.lock_funds(&user, &200, &5_000);
+    // Set ledger to exactly 1 second after unlock
+    set_ledger_timestamp(&env, 5_001);
+    assert_eq!(client.can_withdraw(&user), true);
+}
+
+// -------------------------------------------------------------------------
+// No locked funds — returns false
+// -------------------------------------------------------------------------
+
+/// User with no locked funds always returns false, regardless of
+/// any stored unlock time or timestamp.
 #[test]
 fn test_can_withdraw_no_locked_funds() {
     let env = test_env();
     let (_id, client) = init_contract(&env);
     let user = new_user(&env);
     assert_eq!(client.can_withdraw(&user), false);
+}
+
+// -------------------------------------------------------------------------
+// Locked balance correctness across boundary checks
+// -------------------------------------------------------------------------
+
+/// The locked balance is unaffected by repeated `can_withdraw` queries.
+/// Lock 300 at T=1000, unlock at T=5000. Check locked balance before,
+/// at, and after unlock — it should remain 300 throughout.
+#[test]
+fn test_locked_balance_correct_before_at_and_after_unlock() {
+    let env = test_env();
+    let (_id, client) = init_contract(&env);
+    let user = new_user(&env);
+    set_ledger_timestamp(&env, 1_000);
+    deposit_balance(&client, &user, 500);
+    client.lock_funds(&user, &300, &5_000);
+
+    // Before unlock (T=4999): cannot withdraw, locked balance = 300
+    set_ledger_timestamp(&env, 4_999);
+    assert_eq!(client.can_withdraw(&user), false);
+    assert_eq!(client.get_locked_balance(&user), 300);
+    // Available balance still reflects deduction
+    assert_eq!(client.get_balance(&user), 200);
+
+    // At unlock (T=5000): can withdraw, locked balance still = 300
+    set_ledger_timestamp(&env, 5_000);
+    assert_eq!(client.can_withdraw(&user), true);
+    assert_eq!(client.get_locked_balance(&user), 300);
+
+    // After unlock (T=5001): can withdraw, locked balance still = 300
+    set_ledger_timestamp(&env, 5_001);
+    assert_eq!(client.can_withdraw(&user), true);
+    assert_eq!(client.get_locked_balance(&user), 300);
+}
+
+// -------------------------------------------------------------------------
+// Boundary rule documentation test
+// -------------------------------------------------------------------------
+
+/// This test explicitly documents the boundary rule:
+/// `can_withdraw` uses **inclusive** comparison (>=).
+///
+/// - ledger.timestamp() <  unlock_time  →  false  (locked)
+/// - ledger.timestamp() >= unlock_time  →  true   (unlocked, if locked_balance > 0)
+#[test]
+fn test_can_withdraw_boundary_rule_is_inclusive_gte() {
+    let env = test_env();
+    let (_id, client) = init_contract(&env);
+    let user = new_user(&env);
+    let unlock_time: u64 = 5_000;
+
+    set_ledger_timestamp(&env, 1_000);
+    deposit_balance(&client, &user, 500);
+    client.lock_funds(&user, &200, &unlock_time);
+
+    // t < unlock_time → false
+    set_ledger_timestamp(&env, unlock_time - 1);
+    assert!(
+        !client.can_withdraw(&user),
+        "Expected false when ledger.timestamp() < unlock_time"
+    );
+
+    // t == unlock_time → true (inclusive boundary)
+    set_ledger_timestamp(&env, unlock_time);
+    assert!(
+        client.can_withdraw(&user),
+        "Expected true when ledger.timestamp() == unlock_time (inclusive >=)"
+    );
+
+    // t > unlock_time → true
+    set_ledger_timestamp(&env, unlock_time + 1);
+    assert!(
+        client.can_withdraw(&user),
+        "Expected true when ledger.timestamp() > unlock_time"
+    );
 }
 
 // =========================================================================
@@ -337,13 +521,25 @@ fn test_can_withdraw_no_locked_funds() {
 #[test]
 fn test_separate_user_balances() {
     let env = test_env();
-    let (_id, client) = init_contract(&env);
+    let (current_contract_address, client) = init_contract(&env);
+    let (env, _admin, client, token_client, token_admin) = test_token(env, client);
+
     let alice = new_user(&env);
     let bob = new_user(&env);
+
+    token_admin.mint(&alice, &10000);
+    token_admin.mint(&bob, &10000);
+
+    // SAC Transfer not yet implemented for deposit so i'll mimick it by trnasfering asset(deposit_amount) from user to the contract
     deposit_balance(&client, &alice, 1_000);
     deposit_balance(&client, &bob, 500);
+
+    token_client.transfer(&alice, &current_contract_address, &1000); // This should be removed when deposit function implements SAC
+    token_client.transfer(&bob, &current_contract_address, &500); // This should be removed when deposit function implements SAC
+
     assert_eq!(client.get_balance(&alice), 1_000);
     assert_eq!(client.get_balance(&bob), 500);
+
     client.withdraw(&alice, &200);
     assert_eq!(client.get_balance(&alice), 800);
     assert_eq!(client.get_balance(&bob), 500);
